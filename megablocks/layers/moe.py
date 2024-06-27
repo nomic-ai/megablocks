@@ -73,6 +73,8 @@ def batched_load_balancing_loss(args : Arguments):
         expert_scores = torch.cat(expert_scores, dim=1).float().mean(dim=0)
     else:
         expert_scores = torch.cat(expert_scores, dim=1).mean(dim=0)
+
+    tokens_per_expert_per_layer = torch.stack(tokens_per_expert)
     tokens_per_expert = torch.cat(tokens_per_expert).to(expert_scores.dtype)
 
     expected_values = num_layers_per_pipeline_stage * args.moe_num_experts
@@ -92,7 +94,7 @@ def batched_load_balancing_loss(args : Arguments):
         args.moe_top_k
     )
     scale = scale_numerator / scale_denominator
-    return scale * torch.dot(tokens_per_expert, expert_scores)
+    return scale * torch.dot(tokens_per_expert, expert_scores), tokens_per_expert_per_layer
 
 
 # NOTE: This class defines MoE expert computation, including expert model parallel
