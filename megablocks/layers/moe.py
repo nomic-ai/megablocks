@@ -5,6 +5,7 @@ from megablocks.layers import mlp
 from megablocks.layers import sharedexpert_registry
 from megablocks.layers.all_to_all import all_to_all
 from megablocks.layers.arguments import Arguments
+from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 import megablocks.ops as ops
 import numpy as np
 import torch
@@ -455,10 +456,15 @@ class MoE(torch.nn.Module):
     def _init_experts_mlp(self, args: Arguments):
         return ParallelMLP(args)
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         # NOTE: If we're going to cast the activations to lower precision
         # do it before we permute the tokens to save bandwidth.
         x = common.cast_if_autocast_enabled(x)
+
+        batch, seqlen, = x.shape[:2]
+
+        if attention_mask is not None:
+            x, indices, _, _ = unpad_input(x, attention_mask)
 
         # Compute the expert scores and assignments.
         scores, expert_weights, top_experts = self.router(x)
@@ -468,4 +474,6 @@ class MoE(torch.nn.Module):
         if self.shared_expert is not None:
             shared_expert_out = self.shared_expert(x)
             out = self.shared_expert.add_experts_sharedexpert(shared_expert_out, out)
+        if attention_mask is not None:
+            out = pad_input(out, indices, batch, seqlen)
         return out
