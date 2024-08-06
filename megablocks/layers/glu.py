@@ -1,12 +1,42 @@
 from megablocks.layers import common
 from megablocks.layers.activation_fn import act_fn
-from megablocks.layers.mlp import SparseMLP, SharedMLP, create_dmoe_expert_weights, resolve_dtensor
+from megablocks.layers.mlp import SparseMLP, SharedMLP, create_dmoe_expert_weights, resolve_dtensor, MLP, create_moe_expert_weights
 from megablocks.layers import mpu
 from megablocks.layers.arguments import Arguments, DEFAULT_ACTIVATION_FN
 from megablocks import grouped_gemm_util as gg
 import stk
 import torch
 
+
+class GLU(MLP):
+    def __init__(self, args : Arguments):
+        super().__init__(args)
+        self.v1 = torch.nn.Parameter(torch.empty(
+            mpu.experts_per_rank(args),
+            args.hidden_size,
+            mpu.features_per_rank(args),
+            device=args.device,
+            dtype=common.dtype(args)))
+        with torch.no_grad():
+            v1 = create_moe_expert_weights(
+                args, args.moe_num_experts, args.ffn_hidden_size,
+                args.hidden_size, args.init_method)
+            self.v1.copy_(v1.transpose(1, 2).contiguous())
+
+        mpu.set_expert_model_parallel_attributes(
+            self.v1, args.moe_expert_model_parallelism)
+    
+    def forward(self, x):
+        w1, v1, w2 = self.scale_grad(self.w1), self.scale_grad(self.v1), self.scale_grad(self.w2)
+        w1, v1, w2 = resolve_dtensor(w1), resolve_dtensor(v1), resolve_dtensor(w2)
+
+        x1 = torch.bmm(x, w1)
+        x2 = torch.bmm(x, v1)
+
+        activation_fn_out = self.args.activation_fn(x1, self.args.activation_fn)
+        x1 = activation_fn_out * x2
+        return torch.bmm(x1, w2)
+        
 
 class SparseGLU(SparseMLP):
 

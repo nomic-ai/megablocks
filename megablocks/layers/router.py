@@ -1,5 +1,6 @@
 from megablocks.layers import common
 from megablocks.layers.arguments import Arguments
+from megablocks.layers import mpu
 import torch
 
 
@@ -62,4 +63,28 @@ class LearnedRouter(torch.nn.Module):
             _uniform_expert_assignment(expert_indices, self.args.moe_num_experts)
             if self.args.uniform_expert_assignment else expert_indices
         )
+        return scores, expert_weights, expert_indices
+
+        
+class ExpertChoiceRouter(LearnedRouter):
+    def expert_capacity(self, tokens):
+        world_size = mpu.get_expert_parallel_world_size(self.args)
+        tokens_per_expert = (tokens * world_size / self.args.moe_num_experts)
+        return int(self.args.moe_capacity_factor * tokens_per_expert)
+
+    def _top_k(self, scores):
+        # use first index since we transpose before passing in 
+        tokens = scores.shape[1]
+
+        top_k = self.expert_capacity(tokens)
+
+        return torch.topk(scores, top_k, dim=-1) 
+
+    def forward(self, x):
+        # output is shape (sl * bs, num_experts)
+        # TODO: why do we take softmax then top_k(scores.T) instead of softmax(layer.T)?
+        scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
+
+        expert_weights, expert_indices = self._top_k(scores.T)
+
         return scores, expert_weights, expert_indices
