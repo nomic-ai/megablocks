@@ -69,22 +69,29 @@ class LearnedRouter(torch.nn.Module):
 class ExpertChoiceRouter(LearnedRouter):
     def expert_capacity(self, tokens):
         world_size = mpu.get_expert_parallel_world_size(self.args)
-        tokens_per_expert = (tokens * world_size / self.args.moe_num_experts)
+        # divide equally to the nearsest integer rounded up
+        tokens_per_expert = (tokens * world_size // self.args.moe_num_experts)
+        tokens_per_expert += (tokens * world_size % self.args.moe_num_experts) > 0
         return int(self.args.moe_capacity_factor * tokens_per_expert)
 
     def _top_k(self, scores):
         # use first index since we transpose before passing in 
-        tokens = scores.shape[1]
+        tokens = scores.shape[-1]
 
         top_k = self.expert_capacity(tokens)
 
         return torch.topk(scores, top_k, dim=-1) 
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         # output is shape (sl * bs, num_experts)
-        # TODO: why do we take softmax then top_k(scores.T) instead of softmax(layer.T)?
-        scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
+        # why do we take softmax then top_k(scores.T) instead of softmax(layer.T)?
+        # (bs, sl, hs) -> (bs, sl, num_experts)
+        scores = self.layer(x).softmax(dim=-1)
 
-        expert_weights, expert_indices = self._top_k(scores.T)
+        if attention_mask is not None:
+            scores = scores * attention_mask.unsqueeze(-1)
+
+        # (bs, sl, num_experts) -> (bs, num_experts, expert_capacity)
+        expert_weights, expert_indices = self._top_k(scores.transpose(1, 2))
 
         return scores, expert_weights, expert_indices
