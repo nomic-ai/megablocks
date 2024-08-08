@@ -427,7 +427,7 @@ class ParallelMLP(torch.nn.Module):
         # Compute the experts.
         x, tokens_per_expert = self.forward_fn(
             x, expert_weights, top_experts)
-        if self.training:
+        if self.training and self.args.moe_loss_weight > 0.0:
             save_load_balancing_loss((tokens_per_expert, scores))
         x = x.view(in_shape)
         if self.bias is not None:
@@ -463,17 +463,18 @@ class MoE(torch.nn.Module):
 
         batch, seqlen, = x.shape[:2]
 
-        if attention_mask is not None:
-            x, indices, _, _ = unpad_input(x, attention_mask)
+        # if attention_mask is not None:
+        #     x, indices, _, _ = unpad_input(x, attention_mask)
 
         # Compute the expert scores and assignments.
-        scores, expert_weights, top_experts = self.router(x)
+        scores, expert_weights, top_experts = self.router(x, attention_mask=attention_mask)
 
         # Compute the experts.
         out = self.experts(x, scores, expert_weights, top_experts)
         if self.shared_expert is not None:
             shared_expert_out = self.shared_expert(x)
             out = self.shared_expert.add_experts_sharedexpert(shared_expert_out, out)
-        if attention_mask is not None:
-            out = pad_input(out, indices, batch, seqlen)
+
+        # if attention_mask is not None:
+        #     out = pad_input(out, indices, batch, seqlen)
         return out
