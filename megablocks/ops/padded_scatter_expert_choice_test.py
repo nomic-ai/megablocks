@@ -4,7 +4,7 @@ from megablocks import ops
 import numpy as np
 import torch
 
-_PADDED_SCATTER_DUPE_TESTS = (
+_PADDED_SCATTER_EXPERT_CHOICE_TESTS = (
     (4, 2, 2),
     (4, 2, 4),
     (4, 16, 4),
@@ -21,7 +21,7 @@ _PADDED_SCATTER_DUPE_TESTS = (
 def _to_numpy(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
 
-def padded_scatter_dupe_reference(x, indices, bin_ids, weights, bins, padded_bins, top_k, hs):
+def padded_scatter_expert_choice_reference(x, indices, bin_ids, weights, bins, padded_bins, top_k, hs):
     x = x.detach().cpu().numpy()
     indices = _to_numpy(indices)
     bin_ids = _to_numpy(bin_ids)
@@ -42,12 +42,14 @@ def padded_scatter_dupe_reference(x, indices, bin_ids, weights, bins, padded_bin
             out[store_idx, :] += scale * x[in_idx, :]
             out_idx += 1
             in_idx += 1
-    return torch.from_numpy(out).cuda().half()
+    out = torch.from_numpy(out).cuda().half()
+    out.requires_grad = True
+    return out
 
-class PaddedScatterDupeTest(parameterized.TestCase):
+class PaddedScatterExpertChoiceTest(parameterized.TestCase):
 
-    @parameterized.parameters(*_PADDED_SCATTER_DUPE_TESTS)
-    def testPaddedScatterDupe(self, sl, hs, num_experts):
+    @parameterized.parameters(*_PADDED_SCATTER_EXPERT_CHOICE_TESTS)
+    def testPaddedScatterExpertChoice(self, sl, hs, num_experts):
         # Create the data and indices.
         torch.manual_seed(42)
         x = torch.randn((1, sl, hs), requires_grad=True).cuda().half()
@@ -74,14 +76,14 @@ class PaddedScatterDupeTest(parameterized.TestCase):
         # Calculate the bin bounds for the sorted tokens
         bins = ops.inclusive_cumsum(tokens_per_expert, 0)
 
-        expert_weights = torch.rand(top_k, num_experts).cuda().half()
+        expert_weights = torch.rand(top_k, num_experts, requires_grad=True).cuda().half()
         expert_weights = expert_weights.reshape(-1)
 
         flat_x = x.reshape(-1, hs)
         gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
-        expected_out = padded_scatter_dupe_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
+        expected_out = padded_scatter_expert_choice_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
 
-        out = ops.padded_scatter_dupe(
+        out = ops.padded_scatter_expert_choice(
             gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1)
 
         # TODO: check that the gradients are correct
@@ -140,10 +142,10 @@ class PaddedScatterDupeTest(parameterized.TestCase):
         flat_x = x.reshape(-1, hs)
         gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
 
-        out = ops.padded_scatter_dupe(
+        out = ops.padded_scatter_expert_choice(
             gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1)
 
-        expected_out = padded_scatter_dupe_reference(gathered_x, indices, bin_ids, expert_weights.flatten(), bins, padded_bins, 1, hs)
+        expected_out = padded_scatter_expert_choice_reference(gathered_x, indices, bin_ids, expert_weights.flatten(), bins, padded_bins, 1, hs)
 
         # Check that duplicates are handled correctly
         self.assertEqual(out.shape, (4, 4))
