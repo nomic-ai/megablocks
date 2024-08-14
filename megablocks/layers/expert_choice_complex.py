@@ -29,8 +29,6 @@ class ExpertChoiceMLP(dmoe.ParallelDroplessMLP):
         bin_ids, expert_ids_indices = ops.sort(expert_ids_flat, self.sort_end_bit)
         # group by expert_id
         indices = flat_global_indices[expert_ids_indices]
-        # TODO: do we need to do this?
-        # indices *= max(num_experts // sl, 1)
 
         # For Expert Choice, tokens_per_expert is fixed
         tokens_per_expert = torch.full((num_experts,), bs * top_k, dtype=torch.int32, device=device)
@@ -38,11 +36,9 @@ class ExpertChoiceMLP(dmoe.ParallelDroplessMLP):
         # Round the token counts up to the block size used in the matrix multiplications
         padded_tokens_per_expert = ops.round_up(tokens_per_expert, self.blocking)
         padded_bins = ops.inclusive_cumsum(padded_tokens_per_expert, 0)
-        padded_bins = dmoe.promote_scalar(padded_bins)
 
         # Calculate the bin bounds for the sorted tokens
         bins = ops.inclusive_cumsum(tokens_per_expert, 0)
-        bins = dmoe.promote_scalar(bins)
 
         return indices, bin_ids, bins, padded_bins, tokens_per_expert, expert_ids_indices
 
@@ -60,18 +56,17 @@ class ExpertChoiceMLP(dmoe.ParallelDroplessMLP):
             bin_ids,
             bins,
             padded_bins,
-            max(top_experts.shape[1] // sl, 1))
+            1
+        )
         # Create the sparse matrix topology
         topo = self.topology(x_gathered, padded_bins)
 
         # Perform the expert computation
-        # x_e = self.mlp(x_gathered, topo)
-        x_e = x_gathered
+        x_e = self.mlp(x_gathered, topo)
 
         # Flatten and sort expert_weights
         expert_weights_flat = expert_weights.reshape(-1)
         expert_weights_sorted = expert_weights_flat[reverse_indices]
-
         # Un-route the data for the MoE output
         x_out = ops.padded_scatter(
             x_e,
@@ -80,7 +75,8 @@ class ExpertChoiceMLP(dmoe.ParallelDroplessMLP):
             expert_weights_sorted,
             bins,
             padded_bins,
-            max(top_experts.shape[1] // sl, 1))
+            1
+        )
 
         return x_out.reshape(bs, sl, hs), tokens_per_expert
         
