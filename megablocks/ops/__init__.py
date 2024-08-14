@@ -10,7 +10,7 @@ from megablocks.ops.repeat import repeat
 from megablocks.ops.replicate import replicate
 from megablocks.ops.round_up import round_up
 from megablocks.ops.scatter import scatter
-from megablocks.ops.padded_scatter_dupe import padded_scatter_dupe
+from megablocks.ops.padded_scatter_expert_choice import padded_scatter_expert_choice
 from megablocks.ops.sort import sort
 from megablocks.ops.sum import sum
 from megablocks.ops.topology import topology

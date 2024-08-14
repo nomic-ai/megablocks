@@ -1,7 +1,5 @@
 import torch
 import os
-# os.environ["TRITON_INTERPRET"] = "1"
-os.environ["TRITON_ALWAYS_COMPILE"] = "1"
 import triton
 import triton.language as tl
 
@@ -23,34 +21,6 @@ def assert_is_vector(x):
 def assert_equal(a, b):
     if a != b:
         raise ValueError(f"Expected dimensions to be equal but got {a} and {b}.")
-
-def test_pid_conds(conds, pid_0=[0], pid_1=[0], pid_2=[0]):
-    '''Test if condition on pids are fulfilled
-    E.g.:
-        '=0'  checks that pid_0 == 0
-        ',>1' checks that pid_1 > 1
-        '>1,=0' checks that pid_0 > 1 and pid_1 == 0
-    '''
-    pids = pid_0[0], pid_1[0], pid_2[0]
-    conds = conds.replace(' ','').split(',')
-    for i, (cond, pid) in enumerate(zip(conds, pids)):
-        if cond=='': continue
-        op, threshold = cond[0], int(cond[1:])
-        if op not in ['<','>','>=','<=','=', '!=']: raise ValueError(f"Rules may only use these ops: '<','>','>=','<=','=', '!='. Invalid rule: '{condition}'.")
-        op = '==' if op == '=' else op
-        if not eval(f'{pid} {op} {threshold}'): return False
-    return True
-
-assert test_pid_conds('')
-assert test_pid_conds('>0', [1], [1])
-assert not test_pid_conds('>0', [0], [1])
-assert test_pid_conds('=0,=1', [0], [1], [0])
-
-def print_if(txt, conds, pid_0=[0], pid_1=[0], pid_2=[0]):
-    '''Print txt, if any condition of pids is fulfilled'''
-    if test_pid_conds(conds, pid_0, pid_1, pid_2):
-        print(txt)
-
 
 # a: (tokens, hidden_size), real.
 # indices: (tokens * top_k), integer.
@@ -122,8 +92,7 @@ def _padded_copy(
     for i in range(tl.cdiv(NUM_COLUMNS, BLOCK_X)):
         mask = offsets < NUM_COLUMNS
         x = tl.load(iptr + offsets, mask=mask)
-        # x = x.to(tl.float32) * scale.to(tl.float32)
-        x = x * scale
+        x = x.to(tl.float32) * scale.to(tl.float32)
 
         tl.store(optr + offsets, x.to(optr.dtype.element_ty), mask=mask)
 
@@ -140,7 +109,7 @@ def _padded_copy(
     key=['NUM_COLUMNS'],
 )        
 @triton.jit
-def _padded_copy_dupe(
+def _padded_copy_expert_choice(
         a,
         b,
         indices,
@@ -314,7 +283,7 @@ def padded_scatter(x, indices, bin_ids, weights, bins, padded_bins, top_k):
     return out.sum(dim=1) if top_k > 1 else out.view(tokens, x.shape[1])
 
 
-def padded_scatter_dupe(x, indices, bin_ids, weights, bins, padded_bins, top_k):
+def padded_scatter_expert_choice(x, indices, bin_ids, weights, bins, padded_bins, top_k):
     # Validate the input shapes.
     assert_is_matrix(x)
     assert_is_vector(indices)
@@ -333,7 +302,7 @@ def padded_scatter_dupe(x, indices, bin_ids, weights, bins, padded_bins, top_k):
         (tokens, num_experts, x.shape[1]),
         dtype=x.dtype,
         device=x.device)
-    _padded_copy_dupe[(indices.shape[0],)](
+    _padded_copy_expert_choice[(indices.shape[0],)](
         out,
         x,
         indices,

@@ -4,7 +4,7 @@ from stk.backend.autocast import custom_fwd, custom_bwd
 
 
 # Autograd wrapper for padded_scatter kernel.
-class PaddedScatterDupeOp(torch.autograd.Function):
+class PaddedScatterExpertChoiceOp(torch.autograd.Function):
 
     @staticmethod
     @custom_fwd
@@ -49,12 +49,12 @@ class PaddedScatterDupeOp(torch.autograd.Function):
         return dgrad, None, None, wgrad, None, None, None, None
 
 
-def padded_scatter_dupe(x: torch.Tensor,
+def padded_scatter_expert_choice(x: torch.Tensor,
                    indices: torch.Tensor,
                    bin_ids: torch.Tensor,
                    weights: torch.Tensor,
                    bins: torch.Tensor,
                    padded_bins: torch.Tensor,
                    top_k: int):
-    return PaddedScatterDupeOp.apply(x, indices, bin_ids, weights, bins,
+    return PaddedScatterExpertChoiceOp.apply(x, indices, bin_ids, weights, bins,
                                  padded_bins, top_k)
