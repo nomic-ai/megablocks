@@ -14,7 +14,7 @@ class PaddedScatterDupeOp(torch.autograd.Function):
             indices, bin_ids, weights, bins, padded_bins, *maybe_x)
         ctx.top_k = top_k
         ctx.x_shape = x.shape
-        return kernels.padded_scatter_dupe(
+        return kernels.padded_scatter_expert_choice(
             x, indices, bin_ids, weights, bins, padded_bins, top_k)
 
     @staticmethod

@@ -7,6 +7,9 @@ import torch
 _PADDED_SCATTER_DUPE_TESTS = (
     (4, 2, 2),
     (4, 2, 4),
+    (4, 16, 4),
+    (128, 16, 2),
+    (128, 16, 4),
     (1024, 16, 4),
     (1024, 16, 8),
     (1024, 16, 64),
@@ -52,22 +55,14 @@ class PaddedScatterDupeTest(parameterized.TestCase):
         capacity = max(sl // num_experts, 1)
 
         # Randomly assign tokens to experts, allowing duplicates.
-        # do randperm since each expert can only choose a token once
+        # do randperm since each expert can only choose a token once but a token can be chosen by multiple experts
         top_experts = torch.stack([torch.randperm(sl)[:capacity] for _ in range(num_experts)]).cuda().int().unsqueeze(0)
         bs, num_experts, top_k = top_experts.shape
         device = top_experts.device
 
-        # Convert (bs, sl) indices to global indices
-        batch_offset = torch.arange(bs, device=device).unsqueeze(1).unsqueeze(2) * sl
-        global_indices = top_experts + batch_offset
-        flat_global_indices = global_indices.reshape(-1)
-        # Create bin_ids (expert ids for each selected token)
-        # expert_ids are [0 * top_k, 1 * top_k, ..., (num_experts - 1) * top_k] for each row
-        expert_ids_flat = torch.arange(num_experts, device=device).repeat(bs * top_k)
-        # we want expert_ids to be grouped by expert so we sort them
-        bin_ids, expert_ids_indices = ops.sort(expert_ids_flat)
-        # group by expert_id
-        indices = flat_global_indices[expert_ids_indices]
+        # bin_ids is i * top_k for each expert
+        bin_ids = torch.arange(num_experts, device=device).unsqueeze(-1).repeat(1, capacity).view(-1)
+        indices = top_experts.view(-1)
 
         # For Expert Choice, tokens_per_expert is fixed
         tokens_per_expert = torch.full((num_experts,), bs * top_k, dtype=torch.int32, device=device)
@@ -84,7 +79,6 @@ class PaddedScatterDupeTest(parameterized.TestCase):
 
         flat_x = x.reshape(-1, hs)
         gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
-
         expected_out = padded_scatter_dupe_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
 
         out = ops.padded_scatter_dupe(
