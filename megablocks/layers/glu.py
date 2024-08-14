@@ -30,12 +30,12 @@ class GLU(MLP):
         w1, v1, w2 = self.scale_grad(self.w1), self.scale_grad(self.v1), self.scale_grad(self.w2)
         w1, v1, w2 = resolve_dtensor(w1), resolve_dtensor(v1), resolve_dtensor(w2)
 
-        x1 = torch.bmm(x, w1)
-        x2 = torch.bmm(x, v1)
+        x1 = x @ w1
+        x2 = x @ v1
 
-        activation_fn_out = self.args.activation_fn(x1, self.args.activation_fn)
+        activation_fn_out = self.args.activation_fn(x1)
         x1 = activation_fn_out * x2
-        return torch.bmm(x1, w2)
+        return x1 @ w2
         
 
 class SparseGLU(SparseMLP):
