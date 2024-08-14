@@ -43,58 +43,58 @@ def padded_scatter_dupe_reference(x, indices, bin_ids, weights, bins, padded_bin
 
 class PaddedScatterDupeTest(parameterized.TestCase):
 
-    # @parameterized.parameters(*_PADDED_SCATTER_DUPE_TESTS)
-    # def testPaddedScatterDupe(self, sl, hs, num_experts):
-    #     # Create the data and indices.
-    #     torch.manual_seed(42)
-    #     x = torch.randn((1, sl, hs), requires_grad=True).cuda().half()
+    @parameterized.parameters(*_PADDED_SCATTER_DUPE_TESTS)
+    def testPaddedScatterDupe(self, sl, hs, num_experts):
+        # Create the data and indices.
+        torch.manual_seed(42)
+        x = torch.randn((1, sl, hs), requires_grad=True).cuda().half()
 
-    #     capacity = max(sl // num_experts, 1)
+        capacity = max(sl // num_experts, 1)
 
-    #     # Randomly assign tokens to experts, allowing duplicates.
-    #     top_experts = torch.randint(0, sl, (1, num_experts, capacity,)).cuda().int()
-    #     bs, num_experts, top_k = top_experts.shape
-    #     device = top_experts.device
+        # Randomly assign tokens to experts, allowing duplicates.
+        # do randperm since each expert can only choose a token once
+        top_experts = torch.stack([torch.randperm(sl)[:capacity] for _ in range(num_experts)]).cuda().int().unsqueeze(0)
+        bs, num_experts, top_k = top_experts.shape
+        device = top_experts.device
 
-    #     # Convert (bs, sl) indices to global indices
-    #     batch_offset = torch.arange(bs, device=device).unsqueeze(1).unsqueeze(2) * sl
-    #     global_indices = top_experts + batch_offset
-    #     flat_global_indices = global_indices.reshape(-1)
-    #     # Create bin_ids (expert ids for each selected token)
-    #     # expert_ids are [0 * top_k, 1 * top_k, ..., (num_experts - 1) * top_k] for each row
-    #     expert_ids_flat = torch.arange(num_experts, device=device).repeat(bs * top_k)
-    #     # we want expert_ids to be grouped by expert so we sort them
-    #     bin_ids, expert_ids_indices = ops.sort(expert_ids_flat)
-    #     # group by expert_id
-    #     indices = flat_global_indices[expert_ids_indices]
+        # Convert (bs, sl) indices to global indices
+        batch_offset = torch.arange(bs, device=device).unsqueeze(1).unsqueeze(2) * sl
+        global_indices = top_experts + batch_offset
+        flat_global_indices = global_indices.reshape(-1)
+        # Create bin_ids (expert ids for each selected token)
+        # expert_ids are [0 * top_k, 1 * top_k, ..., (num_experts - 1) * top_k] for each row
+        expert_ids_flat = torch.arange(num_experts, device=device).repeat(bs * top_k)
+        # we want expert_ids to be grouped by expert so we sort them
+        bin_ids, expert_ids_indices = ops.sort(expert_ids_flat)
+        # group by expert_id
+        indices = flat_global_indices[expert_ids_indices]
 
-    #     # For Expert Choice, tokens_per_expert is fixed
-    #     tokens_per_expert = torch.full((num_experts,), bs * top_k, dtype=torch.int32, device=device)
+        # For Expert Choice, tokens_per_expert is fixed
+        tokens_per_expert = torch.full((num_experts,), bs * top_k, dtype=torch.int32, device=device)
 
-    #     # Round the token counts up to the block size used in the matrix multiplications
-    #     padded_tokens_per_expert = ops.round_up(tokens_per_expert, 128)
-    #     padded_bins = ops.inclusive_cumsum(padded_tokens_per_expert, 0)
+        # Round the token counts up to the block size used in the matrix multiplications
+        padded_tokens_per_expert = ops.round_up(tokens_per_expert, 128)
+        padded_bins = ops.inclusive_cumsum(padded_tokens_per_expert, 0)
 
-    #     # Calculate the bin bounds for the sorted tokens
-    #     bins = ops.inclusive_cumsum(tokens_per_expert, 0)
+        # Calculate the bin bounds for the sorted tokens
+        bins = ops.inclusive_cumsum(tokens_per_expert, 0)
 
-    #     expert_weights = torch.rand(top_k, num_experts).cuda().half()
-    #     expert_weights = expert_weights.reshape(-1)
+        expert_weights = torch.rand(top_k, num_experts).cuda().half()
+        expert_weights = expert_weights.reshape(-1)
 
-    #     flat_x = x.reshape(-1, hs)
-    #     gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
+        flat_x = x.reshape(-1, hs)
+        gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
 
-    #     expected_out = padded_scatter_dupe_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
+        expected_out = padded_scatter_dupe_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
 
-    #     out = ops.padded_scatter_dupe(
-    #         gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1)
+        out = ops.padded_scatter_dupe(
+            gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1)
 
-    #     import pdb; pdb.set_trace()
-    #     out.backward(torch.randn_like(out))  # sanity check backward pass
-
-    #     # Check approximate equality (scatter reduce uses atomics).
-    #     np.testing.assert_allclose(
-    #         _to_numpy(out), _to_numpy(expected_out), rtol=5e-3)
+        # TODO: check that the gradients are correct
+        out.backward(torch.randn_like(out))  # sanity check backward pass
+        # Check approximate equality (scatter reduce uses atomics).
+        np.testing.assert_allclose(
+            _to_numpy(out), _to_numpy(expected_out), rtol=5e-3)
 
     def testDuplicateIndices(self):
         x = torch.tensor([
