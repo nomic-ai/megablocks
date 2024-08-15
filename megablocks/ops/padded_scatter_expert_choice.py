@@ -26,7 +26,7 @@ class PaddedScatterExpertChoiceOp(torch.autograd.Function):
         indices, bin_ids, weights, bins, padded_bins = saved_tensors[:5]
         dgrad = None
         if ctx.needs_input_grad[0]:
-            dgrad = kernels.padded_gather(
+            dgrad = kernels.padded_gather_expert_choice(
                 grad,
                 indices,
                 bin_ids,
