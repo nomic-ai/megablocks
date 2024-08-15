@@ -121,6 +121,7 @@ def _padded_copy_expert_choice(
         NUM_COLUMNS : tl.constexpr,
         BLOCK_X : tl.constexpr,
         SCALE : tl.constexpr,
+        A_TO_B : tl.constexpr,
         ):
     # Our index into array 'a'.
     # will launch indices.shape[0] threads at once
@@ -150,11 +151,14 @@ def _padded_copy_expert_choice(
     # need to reduce the result. Using atomics is slow, so we
     # do the reduce step in a second kernel.
     offset = index_a
-    # out is shape (tokens, num_experts, top_k, hidden_size)
-    a += tl.multiple_of(offset * NUM_COLUMNS * NUM_EXPERTS, NUM_COLUMNS)
-    # offset by columns by expert_idx (which is the same as bin_idx)
-    if bin_idx > 0:
-        a += NUM_COLUMNS * bin_idx
+    if A_TO_B:
+        a += tl.multiple_of(offset * NUM_COLUMNS, NUM_COLUMNS)
+    else:
+        # out is shape (tokens, num_experts, top_k, hidden_size)
+        a += tl.multiple_of(offset * NUM_COLUMNS * NUM_EXPERTS, NUM_COLUMNS)
+        # offset by columns by expert_idx (which is the same as bin_idx)
+        if bin_idx > 0:
+            a += NUM_COLUMNS * bin_idx
 
     b += tl.multiple_of(index_b * NUM_COLUMNS, NUM_COLUMNS)
     offsets = tl.max_contiguous(tl.arange(0, BLOCK_X), BLOCK_X)
@@ -163,8 +167,8 @@ def _padded_copy_expert_choice(
     scale = tl.load(weights + pid) if SCALE else 1
 
     # Swap the pointers depending on the direction.
-    iptr = b
-    optr = a
+    iptr = a if A_TO_B else b
+    optr = b if A_TO_B else a
 
     for i in range(tl.cdiv(NUM_COLUMNS, BLOCK_X)):
         mask = offsets < NUM_COLUMNS
@@ -282,6 +286,42 @@ def padded_scatter(x, indices, bin_ids, weights, bins, padded_bins, top_k):
     # Reduce along the top-k dimension, if needed.
     return out.sum(dim=1) if top_k > 1 else out.view(tokens, x.shape[1])
 
+def padded_gather_expert_choice(x, indices, bin_ids, weights, bins, padded_bins, top_k):
+    # Validate the input shapes.
+    assert_is_matrix(x)
+    assert_is_vector(indices)
+    assert_is_vector(bin_ids)
+    assert_is_vector(bins)
+    assert_is_vector(padded_bins)
+    assert_equal(indices.shape[0], bin_ids.shape[0])
+    assert_equal(bins.size(), padded_bins.size())
+    
+    if weights is not None:
+        assert_equal(weights.shape[0], x.shape[0] * top_k)
+
+    output_rows = padded_bins[-1].cpu().item()
+    out = torch.zeros(
+        (output_rows, x.shape[1]),
+        dtype=x.dtype,
+        device=x.device
+        )
+
+    _padded_copy_expert_choice[(indices.shape[0],)](
+        x,
+        out,
+        indices,
+        bin_ids,
+        weights,
+        bins,
+        padded_bins,
+        NUM_COLUMNS=x.shape[1],
+        NUM_EXPERTS=x.shape[1],
+        A_TO_B=True,
+        SCALE=weights is not None,
+    )
+    return out
+    
+
 
 def padded_scatter_expert_choice(x, indices, bin_ids, weights, bins, padded_bins, top_k):
     # Validate the input shapes.
@@ -312,6 +352,7 @@ def padded_scatter_expert_choice(x, indices, bin_ids, weights, bins, padded_bins
         padded_bins,
         NUM_EXPERTS=num_experts,
         NUM_COLUMNS=x.shape[1],
+        A_TO_B=False,
         SCALE=weights is not None,
     )
     # reduce along the expert dimension
