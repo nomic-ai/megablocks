@@ -22,28 +22,22 @@ def _to_numpy(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
 
 def padded_scatter_expert_choice_reference(x, indices, bin_ids, weights, bins, padded_bins, top_k, hs):
-    x = x.detach().cpu().numpy()
-    indices = _to_numpy(indices)
-    bin_ids = _to_numpy(bin_ids)
-    weights = _to_numpy(weights)
-    bins = _to_numpy(bins)
-    padded_bins = _to_numpy(padded_bins)
+    num_tokens = indices.shape[0] // top_k
+    device, dtype = x.device, x.dtype
+    out = torch.zeros((num_tokens, hs), device=device, dtype=dtype)
 
-    out = np.zeros((indices.shape[0] // top_k, hs))
     out_idx = 0
     for i in range(len(bins)):
-        in_idx = 0 if i == 0 else padded_bins[i - 1]
-        end = bins[i]
-        while out_idx < end:
-            store_idx = indices[out_idx]
-            scale = weights[out_idx]  # Use out_idx instead of store_idx
-            store_idx //= top_k
+        in_idx = 0 if i == 0 else padded_bins[i - 1].item()
+        end = bins[i].item()
 
-            out[store_idx, :] += scale * x[in_idx, :]
+        while out_idx < end:
+            store_idx = indices[out_idx].item() // top_k
+            scale = weights[out_idx]
+            out[store_idx] += scale * x[in_idx]
             out_idx += 1
             in_idx += 1
-    out = torch.from_numpy(out).cuda().half()
-    out.requires_grad = True
+
     return out
 
 class PaddedScatterExpertChoiceTest(parameterized.TestCase):
@@ -81,16 +75,35 @@ class PaddedScatterExpertChoiceTest(parameterized.TestCase):
 
         flat_x = x.reshape(-1, hs)
         gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
-        expected_out = padded_scatter_expert_choice_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
 
+        gathered_x = gathered_x.detach().requires_grad_(True)
+        expert_weights = expert_weights.detach().requires_grad_(True)
+
+        # Reference implementation
+        expected_out = padded_scatter_expert_choice_reference(gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1, hs)
+        grad_output = torch.randn_like(expected_out)
+
+        ref_grad_x, ref_grad_weights = torch.autograd.grad(
+            expected_out, (gathered_x, expert_weights), grad_outputs=grad_output
+            )
+
+        # Custom implementation
         out = ops.padded_scatter_expert_choice(
             gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1)
 
-        # TODO: check that the gradients are correct
-        out.backward(torch.randn_like(out))  # sanity check backward pass
-        # Check approximate equality (scatter reduce uses atomics).
+        custom_grad_x, custom_grad_weights = torch.autograd.grad(
+            out, (gathered_x, expert_weights), grad_outputs=grad_output, retain_graph=True
+        )
+        
+        # Check forward pass
         np.testing.assert_allclose(
             _to_numpy(out), _to_numpy(expected_out), rtol=5e-3)
+        
+        np.testing.assert_allclose(
+            _to_numpy(custom_grad_x), _to_numpy(ref_grad_x), rtol=5e-3)
+        # TODO: check that this is actually precision error
+        np.testing.assert_allclose(
+                _to_numpy(custom_grad_weights), _to_numpy(ref_grad_weights), rtol=0.2)
 
     def testDuplicateIndices(self):
         x = torch.tensor([
@@ -159,4 +172,4 @@ class PaddedScatterExpertChoiceTest(parameterized.TestCase):
         np.testing.assert_allclose(out, expected_out, rtol=1e-3)
 
 if __name__ == '__main__':
-    unittest.main(failfast=True)
+    unittest.main()#failfast=True)

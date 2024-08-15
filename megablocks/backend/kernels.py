@@ -1,5 +1,4 @@
 import torch
-import os
 import triton
 import triton.language as tl
 
@@ -458,7 +457,133 @@ def padded_scatter_wgrad(x, grad, indices, bin_ids, bins, padded_bins, top_k):
         bins,
         padded_bins,
         NUM_COLUMNS=x.shape[1],
-        TOP_K=top_k)
+        TOP_K=top_k,
+    )
+    return out
+
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_X': 64}, num_warps=2),
+        triton.Config({'BLOCK_X': 128}, num_warps=2),
+        triton.Config({'BLOCK_X': 256}, num_warps=2),
+        triton.Config({'BLOCK_X': 128}, num_warps=4),
+        triton.Config({'BLOCK_X': 256}, num_warps=4),
+    ],
+    key=['NUM_COLUMNS'],
+)
+@triton.jit
+def _padded_copy_expert_choice_wgrad(
+         x,
+        grad,
+        wgrad,
+        indices,
+        bin_ids,
+        bins,
+        padded_bins,
+        NUM_COLUMNS : tl.constexpr,
+        BLOCK_X : tl.constexpr
+):
+    # Our index into 'tokens * top_k'.
+    pid = tl.program_id(0)
+    index_out = tl.load(indices + pid)
+
+    # One threadblock per row in 'a'. Array 'b' has greater or equal
+    # number of rows since they could be padded.
+    bin_idx = tl.load(bin_ids + pid)
+
+    # Now we know what bin we're assigned to, but we need to know how
+    # many threadblocks were assigned to earlier bins so we can offset
+    # in our bin properly.
+    offset_in_bin = pid;
+    if bin_idx > 0:
+        offset_in_bin -= tl.load(bins + bin_idx - 1)
+
+    # Load the starting index of our bin in array 'x'.
+    index_x = offset_in_bin;
+    if bin_idx > 0:
+        index_x += tl.load(padded_bins + bin_idx - 1)
+    """
+    # Offset the input and output pointers.
+    #
+    # If we're going from A to B, divide the input index to copy
+    # the same input repeatedly. If we're going from B to A we
+    # need to reduce the result. Using atomics is slow, so we
+    # do the reduce step in a second kernel.
+    offset = index_a
+    # out is shape (tokens, num_experts, top_k, hidden_size)
+    a += tl.multiple_of(offset * NUM_COLUMNS * NUM_EXPERTS, NUM_COLUMNS)
+    # offset by columns by expert_idx (which is the same as bin_idx)
+    if bin_idx > 0:
+        a += NUM_COLUMNS * bin_idx
+
+    b += tl.multiple_of(index_b * NUM_COLUMNS, NUM_COLUMNS)
+    offsets = tl.max_contiguous(tl.arange(0, BLOCK_X), BLOCK_X)
+
+    >>> grad                                                                                                                                                             
+    tensor([[ 0.1940,  2.1621],                                                                                                                                          
+            [-0.1720,  0.8491],                                                                                                                                          
+            [-1.9248,  0.6528],                                                                                                                                          
+            [-0.6494, -0.8174]], device='cuda:0', dtype=torch.float16)
+    >>> ref_grad_weights                                                                                                                                                 
+    tensor([-0.9131,  2.0410,  2.0410,  0.3438], device='cuda:0',                                                                                                        
+        dtype=torch.float16)                                                                                                                                          
+    >>> indices                                                                                                                                                          
+    tensor([3, 2, 2, 0], device='cuda:0', dtype=torch.int32)                                                                                                             
+    >>> (gathered_x[0] * grad[3]).sum()                                                                                                                                  
+    tensor(-0.9131, device='cuda:0', dtype=torch.float16, grad_fn=<SumBackward0>)                                                                                        
+    >>> (gathered_x[1] * grad[2]).sum()                                                                                                                                  
+    tensor(2.0410, device='cuda:0', dtype=torch.float16, grad_fn=<SumBackward0>)                                                                                         
+    >>> (gathered_x[128] * grad[2]).sum()                                                                                                                                
+    tensor(2.0410, device='cuda:0', dtype=torch.float16, grad_fn=<SumBackward0>)                                                                                         
+    >>> (gathered_x[129] * grad[0]).sum()                                                                                                                                
+    tensor(0.3438, device='cuda:0', dtype=torch.float16, grad_fn=<SumBackward0>)                                                                                         
+    >>> out[i] = x[i + padded_bins[bin_idx -1]] + grad[idx]
+    """
+    # Offset the input and output pointers.
+    wgrad += pid
+    grad += tl.multiple_of(index_out * NUM_COLUMNS, NUM_COLUMNS)
+    x += tl.multiple_of(index_x * NUM_COLUMNS, NUM_COLUMNS)
+    offsets = tl.max_contiguous(tl.arange(0, BLOCK_X), BLOCK_X)
+
+    acc = tl.zeros((BLOCK_X,), dtype=tl.float32)
+    iterations = tl.cdiv(NUM_COLUMNS, BLOCK_X)
+    for i in range(tl.cdiv(NUM_COLUMNS, BLOCK_X)):
+        mask = offsets < NUM_COLUMNS
+        data = tl.load(x + offsets, mask=mask).to(tl.float32)
+        scale = tl.load(grad + offsets, mask=mask).to(tl.float32)
+        acc += data * scale
+        offsets += BLOCK_X
+
+    # Reduce to get the final result and store.
+    out = tl.sum(acc).to(wgrad.dtype.element_ty)
+    tl.store(wgrad, out)
+
+    
+def padded_scatter_expert_choice_wgrad(x, grad, indices, bin_ids, bins, padded_bins, top_k):
+    # Validate the input shapes.
+    assert_is_matrix(x)
+    assert_is_matrix(grad)
+    assert_is_vector(indices)
+    assert_is_vector(bin_ids)
+    assert_is_vector(bins)
+    assert_is_vector(padded_bins)
+    assert_equal(indices.shape[0], bin_ids.shape[0])
+    assert_equal(bins.size(), padded_bins.size())
+    tokens = indices.shape[0]
+    out = torch.zeros(
+        (tokens),
+        dtype=x.dtype,
+        device=x.device)
+    _padded_copy_expert_choice_wgrad[(indices.shape[0],)](
+        x,
+        grad,
+        out,
+        indices,
+        bin_ids,
+        bins,
+        padded_bins,
+        NUM_COLUMNS=x.shape[1],
+    )
     return out
 
 

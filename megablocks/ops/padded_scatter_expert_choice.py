@@ -38,7 +38,7 @@ class PaddedScatterExpertChoiceOp(torch.autograd.Function):
         wgrad = None
         if ctx.needs_input_grad[3]:  # need wgrad
             x = saved_tensors[-1]
-            wgrad = kernels.padded_scatter_wgrad(
+            wgrad = kernels.padded_scatter_expert_choice_wgrad(
                 x,
                 grad,
                 indices,
