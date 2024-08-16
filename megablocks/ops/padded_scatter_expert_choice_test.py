@@ -153,7 +153,7 @@ class PaddedScatterExpertChoiceTest(parameterized.TestCase):
         expert_weights = expert_weights.reshape(-1)
         expert_weights = expert_weights[expert_ids_indices]
         flat_x = x.reshape(-1, hs)
-        gathered_x = ops.padded_gather(flat_x, indices, bin_ids, bins, padded_bins, 1)
+        gathered_x = ops.padded_gather_expect_choice(flat_x, indices, bin_ids, bins, padded_bins, 1)
 
         out = ops.padded_scatter_expert_choice(
             gathered_x, indices, bin_ids, expert_weights, bins, padded_bins, 1)
