@@ -93,5 +93,33 @@ class ExpertChoiceRouter(LearnedRouter):
 
         # (bs, sl, num_experts) -> (bs, num_experts, expert_capacity)
         expert_weights, expert_indices = self._top_k(scores.transpose(1, 2))
+        if self.args.moe_normalize_expert_weights:
+            batch_size, _, _ = expert_weights.shape
+            seq_len = x.shape[1]
+            # for b in range(batch_size):
+            #     row_weights = expert_weights[b, :, :]
+            #     row_tokens = expert_indices[b, :, :].unique()
+            #     for token in row_tokens:
+            #         denom = row_weights[expert_indices[b, :, :] == token].sum()
+            #         slow_expert_weights[b, :, :][expert_indices[b, :, :] == token] /= denom
+
+            # denom = torch.ones_like(expert_weights)
+
+            input_shape = expert_indices.shape
+            # offset indices by bs * sl
+            batch_offset = torch.arange(batch_size, device=expert_indices.device).unsqueeze(1).unsqueeze(2) * seq_len
+            offset_indices = expert_indices + batch_offset
+            offset_indices_flat = offset_indices.flatten()
+
+            weights = expert_weights.flatten()
+
+            max_index = offset_indices_flat.max()
+            output = torch.zeros(max_index + 1, dtype=weights.dtype, device=expert_indices.device, requires_grad=True)
+            output = output.scatter_add(0, offset_indices_flat, weights)
+            output = torch.clamp(output, min=1e-6)
+
+            normalized_weight = weights / output[offset_indices_flat]
+
+            expert_weights = normalized_weight.view(input_shape)
 
         return scores, expert_weights, expert_indices
