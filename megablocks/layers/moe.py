@@ -456,12 +456,13 @@ class MoE(torch.nn.Module):
     def _init_experts_mlp(self, args: Arguments):
         return ParallelMLP(args)
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x, attention_mask=None, batch=None, seqlen=None, indices=None):
         # NOTE: If we're going to cast the activations to lower precision
         # do it before we permute the tokens to save bandwidth.
         x = common.cast_if_autocast_enabled(x)
 
-        batch, seqlen, = x.shape[:2]
+        if indices is not None:
+            x = pad_input(x, indices, batch, seqlen)
 
         # if attention_mask is not None:
         #     x, indices, _, _ = unpad_input(x, attention_mask)
@@ -474,6 +475,9 @@ class MoE(torch.nn.Module):
         if self.shared_expert is not None:
             shared_expert_out = self.shared_expert(x)
             out = self.shared_expert.add_experts_sharedexpert(shared_expert_out, out)
+
+        if indices is not None:
+            out, _, _, _ = unpad_input(out, attention_mask)
 
         # if attention_mask is not None:
         #     out = pad_input(out, indices, batch, seqlen)

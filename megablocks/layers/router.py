@@ -116,6 +116,7 @@ class ExpertChoiceRouter(LearnedRouter):
             max_index = offset_indices_flat.max()
             output = torch.zeros(max_index + 1, dtype=weights.dtype, device=expert_indices.device, requires_grad=True)
             output = output.scatter_add(0, offset_indices_flat, weights)
+            # clamp to avoid nans when we mask out scores for the padded tokens
             output = torch.clamp(output, min=1e-6)
 
             normalized_weight = weights / output[offset_indices_flat]

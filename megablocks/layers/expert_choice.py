@@ -50,7 +50,7 @@ class ExpertChoiceMLP(dmoe.ParallelDroplessMLP):
 
         # Flatten x and gather the selected tokens
         x_flat = x.reshape(-1, hs)
-        x_gathered = ops.padded_gather(
+        x_gathered = ops.padded_gather_expert_choice(
             x_flat,
             indices,
             bin_ids,
@@ -68,7 +68,7 @@ class ExpertChoiceMLP(dmoe.ParallelDroplessMLP):
         expert_weights_flat = expert_weights.reshape(-1)
         expert_weights_sorted = expert_weights_flat[reverse_indices]
         # Un-route the data for the MoE output
-        x_out = ops.padded_scatter(
+        x_out = ops.padded_scatter_expert_choice(
             x_e,
             indices,
             bin_ids,
