@@ -461,7 +461,7 @@ class MoE(torch.nn.Module):
         # do it before we permute the tokens to save bandwidth.
         x = common.cast_if_autocast_enabled(x)
 
-        if attention_mask is not None and indices is None:
+        if attention_mask is not None and indices is not None:
             raise ValueError("Either indices or attention_mask must be provided.")
 
         if indices is not None:
