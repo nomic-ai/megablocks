@@ -5,7 +5,6 @@ from megablocks.layers import mlp
 from megablocks.layers import sharedexpert_registry
 from megablocks.layers.all_to_all import all_to_all
 from megablocks.layers.arguments import Arguments
-from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 import megablocks.ops as ops
 import numpy as np
 import torch
@@ -456,19 +455,10 @@ class MoE(torch.nn.Module):
     def _init_experts_mlp(self, args: Arguments):
         return ParallelMLP(args)
 
-    def forward(self, x, attention_mask=None, batch=None, seqlen=None, indices=None):
+    def forward(self, x, attention_mask=None):
         # NOTE: If we're going to cast the activations to lower precision
         # do it before we permute the tokens to save bandwidth.
         x = common.cast_if_autocast_enabled(x)
-
-        if attention_mask is not None and indices is not None:
-            raise ValueError("Either indices or attention_mask must be provided.")
-
-        if indices is not None:
-            x = pad_input(x, indices, batch, seqlen)
-
-        elif attention_mask is not None:
-            x, indices, _, _ = unpad_input(x, attention_mask)
 
         # Compute the expert scores and assignments.
         scores, expert_weights, top_experts = self.router(x, attention_mask=attention_mask)
@@ -478,11 +468,5 @@ class MoE(torch.nn.Module):
         if self.shared_expert is not None:
             shared_expert_out = self.shared_expert(x)
             out = self.shared_expert.add_experts_sharedexpert(shared_expert_out, out)
-
-        if indices is not None:
-            out, _, _, _ = unpad_input(out, attention_mask)
-
-        elif attention_mask is not None:
-            out = pad_input(out, indices, batch, seqlen)
 
         return out
