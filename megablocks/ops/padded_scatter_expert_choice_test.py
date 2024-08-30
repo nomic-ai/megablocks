@@ -172,4 +172,4 @@ class PaddedScatterExpertChoiceTest(parameterized.TestCase):
         np.testing.assert_allclose(out, expected_out, rtol=1e-3)
 
 if __name__ == '__main__':
-    unittest.main()#failfast=True)
+    unittest.main()
