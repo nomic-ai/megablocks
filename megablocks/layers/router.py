@@ -96,6 +96,7 @@ class ExpertChoiceRouter(LearnedRouter):
         if self.args.moe_normalize_expert_weights:
             batch_size, _, _ = expert_weights.shape
             seq_len = x.shape[1]
+            # pseudocode of what's happening below
             # for b in range(batch_size):
             #     row_weights = expert_weights[b, :, :]
             #     row_tokens = expert_indices[b, :, :].unique()
