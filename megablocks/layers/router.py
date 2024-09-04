@@ -1,5 +1,6 @@
 from megablocks.layers import common
 from megablocks.layers.arguments import Arguments
+from megablocks.layers import mpu
 import torch
 
 
@@ -48,7 +49,7 @@ class LearnedRouter(torch.nn.Module):
             return scores.max(dim=-1,keepdim=True)
         return torch.topk(scores, self.args.moe_top_k, dim=-1)
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         if self.training and self.args.moe_jitter_eps is not None:
             x = x * self.jitter(x)
 
@@ -62,4 +63,65 @@ class LearnedRouter(torch.nn.Module):
             _uniform_expert_assignment(expert_indices, self.args.moe_num_experts)
             if self.args.uniform_expert_assignment else expert_indices
         )
+        return scores, expert_weights, expert_indices
+
+        
+class ExpertChoiceRouter(LearnedRouter):
+    def expert_capacity(self, tokens):
+        world_size = mpu.get_expert_parallel_world_size(self.args)
+        # divide equally to the nearsest integer rounded up
+        tokens_per_expert = (tokens * world_size // self.args.moe_num_experts)
+        tokens_per_expert += (tokens * world_size % self.args.moe_num_experts) > 0
+        return int(self.args.moe_capacity_factor * tokens_per_expert)
+
+    def _top_k(self, scores):
+        # use first index since we transpose before passing in 
+        tokens = scores.shape[-1]
+
+        top_k = self.expert_capacity(tokens)
+
+        return torch.topk(scores, top_k, dim=-1) 
+
+    def forward(self, x, attention_mask=None):
+        # output is shape (sl * bs, num_experts)
+        # why do we take softmax then top_k(scores.T) instead of softmax(layer.T)?
+        # (bs, sl, hs) -> (bs, sl, num_experts)
+        scores = self.layer(x).softmax(dim=-1)
+
+        if attention_mask is not None:
+            scores = scores * attention_mask.unsqueeze(-1)
+
+        # (bs, sl, num_experts) -> (bs, num_experts, expert_capacity)
+        expert_weights, expert_indices = self._top_k(scores.transpose(1, 2))
+        if self.args.moe_normalize_expert_weights:
+            batch_size, _, _ = expert_weights.shape
+            seq_len = x.shape[1]
+            # pseudocode of what's happening below
+            # for b in range(batch_size):
+            #     row_weights = expert_weights[b, :, :]
+            #     row_tokens = expert_indices[b, :, :].unique()
+            #     for token in row_tokens:
+            #         denom = row_weights[expert_indices[b, :, :] == token].sum()
+            #         slow_expert_weights[b, :, :][expert_indices[b, :, :] == token] /= denom
+
+            # denom = torch.ones_like(expert_weights)
+
+            input_shape = expert_indices.shape
+            # offset indices by bs * sl
+            batch_offset = torch.arange(batch_size, device=expert_indices.device).unsqueeze(1).unsqueeze(2) * seq_len
+            offset_indices = expert_indices + batch_offset
+            offset_indices_flat = offset_indices.flatten()
+
+            weights = expert_weights.flatten()
+
+            max_index = offset_indices_flat.max()
+            output = torch.zeros(max_index + 1, dtype=weights.dtype, device=expert_indices.device, requires_grad=True)
+            output = output.scatter_add(0, offset_indices_flat, weights)
+            # clamp to avoid nans when we mask out scores for the padded tokens
+            output = torch.clamp(output, min=1e-6)
+
+            normalized_weight = weights / output[offset_indices_flat]
+
+            expert_weights = normalized_weight.view(input_shape)
+
         return scores, expert_weights, expert_indices
