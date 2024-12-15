@@ -460,12 +460,30 @@ class MoE(torch.nn.Module):
         # do it before we permute the tokens to save bandwidth.
         x = common.cast_if_autocast_enabled(x)
 
+        # Get original shape for later reshaping
+        batch_size, seq_len, hidden_dim = x.shape
+        
+        # Only compute for non-padded tokens if attention mask is provided
+        if attention_mask is not None:
+            # Get indices of non-padded tokens
+            valid_indices = attention_mask.bool().view(-1)
+            x_valid = x.view(-1, hidden_dim)[valid_indices]
+        else:
+            x_valid = x.view(-1, hidden_dim)
+
         # Compute the expert scores and assignments.
-        scores, expert_weights, top_experts = self.router(x, attention_mask=attention_mask)
+        scores, expert_weights, top_experts = self.router(x_valid)
 
         # Compute the experts.
-        out = self.experts(x, scores, expert_weights, top_experts)
+        out = self.experts(x_valid, scores, expert_weights, top_experts)
         out = out.to(x.dtype)
+
+        # Reconstruct the full sequence with padding
+        if attention_mask is not None:
+            full_out = torch.zeros(batch_size * seq_len, hidden_dim, dtype=out.dtype, device=out.device)
+            full_out[valid_indices] = out
+            out = full_out.view(batch_size, seq_len, hidden_dim)
+
         if self.shared_expert is not None:
             shared_expert_out = self.shared_expert(x)
             out = self.shared_expert.add_experts_sharedexpert(shared_expert_out, out)
