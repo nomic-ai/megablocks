@@ -30,7 +30,7 @@ ext_modules = [
 
 install_requires=[
     "triton>=2.1.0",
-    "stanford-stk==0.7.0",
+    "stanford-stk>=0.7.0",
 ]
 
 extra_deps = {}
