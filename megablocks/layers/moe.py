@@ -132,10 +132,13 @@ class ParallelMLP(torch.nn.Module):
             self.register_parameter('bias', None)
 
         # Select the forward function for the operating mode.
-        self.forward_fn = (
-            self.parallel_forward_once if
-            args.moe_expert_model_parallelism else
-            self.forward_once)
+
+        if self.args.moe_expert_choice:
+            self.forward_fn = self.forward_ec
+        elif args.moe_expert_model_parallelism:
+            self.forward_fn = self.parallel_forward_once
+        else:
+            self.forward_fn = self.forward_once
 
     def expert_capacity(self, tokens):
         world_size = mpu.get_expert_parallel_world_size(self.args)
@@ -214,7 +217,7 @@ class ParallelMLP(torch.nn.Module):
 
             # If expert_capacity is set to zero, set the number of tokens
             # per expert to the maximum we need to avoid dropping tokens.
-            sl, bs, hs = x.size()
+            bs, sl, _ = x.size()
             expert_capacity = self.expert_capacity(sl * bs)
             if expert_capacity == 0:
                 expert_capacity = torch.max(tokens_per_expert).item()
@@ -420,6 +423,34 @@ class ParallelMLP(torch.nn.Module):
             self.top_k)
         return x, tokens_per_expert.flatten()
 
+    def forward_ec(self, x, expert_weights, top_experts):
+        """
+        Expert choice forward func
+        sl = sequence length
+        bs = batch size
+        hs = hidden size
+        k = expert capacity
+        Refs:
+        - https://arxiv.org/pdf/2202.09368
+        - https://github.com/google/flaxformer/blob/main/flaxformer/architectures/moe/routing.py#L647-L717
+        - https://github.com/google/flaxformer/blob/399ea3a85e9807ada653fd0de1a9de627eb0acde/flaxformer/architectures/moe/moe_layers.py#L361
+        - https://github.com/microsoft/DeepSpeed/issues/2517
+        """
+        bs, sl, hs = x.shape
+        _, num_experts, k = expert_weights.shape
+        # [bs, num_experts, k, sl]
+        expert_gather_indices = torch.nn.functional.one_hot(top_experts, num_classes=sl).to(x.dtype)
+        # [bs, sl, num_experts, k]
+        expert_gather_indices = torch.moveaxis(expert_gather_indices, 3, 1)
+        x_in = torch.einsum('bs...,bsek->bek...', x, expert_gather_indices)
+        x_in = x_in.permute(1, 0, 2, 3).reshape(num_experts, bs * k, hs)
+        x_e = self.mlp(x_in) # [num_experts, bs*k, d]
+        combine_array = torch.einsum('...ek,...sek->...sek', expert_weights, expert_gather_indices)
+        x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 0, 2, 3)
+        x_out = torch.einsum('bek...,bsek->bs...', x_e, combine_array)
+        return x_out, None
+
+
     def forward(self, x, scores, expert_weights, top_experts):
         in_shape = x.size()
 
@@ -463,26 +494,31 @@ class MoE(torch.nn.Module):
         # Get original shape for later reshaping
         batch_size, seq_len, hidden_dim = x.shape
         
-        # Only compute for non-padded tokens if attention mask is provided
-        if attention_mask is not None:
-            # Get indices of non-padded tokens
-            valid_indices = attention_mask.bool().view(-1)
-            x_valid = x.view(-1, hidden_dim)[valid_indices]
+        if self.experts.args.moe_expert_choice:
+            scores, expert_weights, top_experts = self.router(x, attention_mask)
+            out = self.experts(x, scores, expert_weights, top_experts)
+            
+            out = out.to(x.dtype)
         else:
-            x_valid = x.view(-1, hidden_dim)
+            # Only compute for non-padded tokens if attention mask is provided
+            if attention_mask is not None:
+                # Get indices of non-padded tokens
+                valid_indices = attention_mask.bool().view(-1)
+                x_valid = x.view(-1, hidden_dim)[valid_indices]
+            else:
+                x_valid = x.view(-1, hidden_dim)
 
-        # Compute the expert scores and assignments.
-        scores, expert_weights, top_experts = self.router(x_valid)
+            scores, expert_weights, top_experts = self.router(x_valid)
+            out = self.experts(x_valid, scores, expert_weights, top_experts)
 
-        # Compute the experts.
-        out = self.experts(x_valid, scores, expert_weights, top_experts)
-        out = out.to(x.dtype)
+            out = out.to(x.dtype)
+            # Compute the experts.
 
-        # Reconstruct the full sequence with padding
-        if attention_mask is not None:
-            full_out = torch.zeros(batch_size * seq_len, hidden_dim, dtype=out.dtype, device=out.device)
-            full_out[valid_indices] = out
-            out = full_out.view(batch_size, seq_len, hidden_dim)
+            # Reconstruct the full sequence with padding
+            if attention_mask is not None:
+                full_out = torch.zeros(batch_size * seq_len, hidden_dim, dtype=out.dtype, device=out.device)
+                full_out[valid_indices] = out
+                out = full_out.view(batch_size, seq_len, hidden_dim)
 
         if self.shared_expert is not None:
             shared_expert_out = self.shared_expert(x)

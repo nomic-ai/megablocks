@@ -52,16 +52,34 @@ class LearnedRouter(torch.nn.Module):
     def forward(self, x, attention_mask=None):
         if self.training and self.args.moe_jitter_eps is not None:
             x = x * self.jitter(x)
-        scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1, dtype=x.dtype)
-        expert_weights, expert_indices = self._top_k(scores)
-        if self.args.moe_normalize_expert_weights:
-            expert_weights = expert_weights / torch.norm(
-                expert_weights, p=self.args.moe_normalize_expert_weights,dim=-1, keepdim=True)
+        if self.args.moe_expert_choice:
+            # Get probability for each token
+            bs, sq, _ = x.shape
+            capacity = self.args.moe_top_k # Use top k as the capacity to match regular MoEs
+            ###scores = self.layer(x).softmax(dim=1) # [batch_size, seq_len, dim] -> [batch_size, seq_len, num_experts]
+            # Let experts choose the highest prob tokens
+            # k = n * c / e (https://arxiv.org/pdf/2202.09368)
+            # where n = tokens (in the paper it seems they even do tokens across batches not just within each batch
+            #; could ablate this by folding together bs & sq)
+            # c = capacity (1 or 2 in the paper) & e = num_experts
+            # [batch_size, seq_len, num_experts] -> [batch_size, k, num_experts] (k is not top k here!!!)
+            # expert_weights corresponds to matrix G (e x k) in the paper
+            # expert_indices corresponds to matrix I (e x k) in the paper
+            ###expert_weights, expert_indices = torch.topk(scores, (capacity * sq) // self.args.moe_num_experts, dim=1)
+            # Softmax is still taken along expert dim, not token dim.
+            # https://github.com/google/flaxformer/blob/399ea3a85e9807ada653fd0de1a9de627eb0acde/flaxformer/architectures/moe/routing.py#L322C7-L322C66
+            # One difference here might be that some do it grouped instead which would be folding bs & sq dims
+            # e.g. https://github.com/llm-random/llm-random/blob/c9e50b75cd99f3ae04c3c3bfad0b7f1bf17f6b88/research/conditional/moe_layers/moe_gating.py#L76
+            scores = self.layer(x).softmax(dim=-1) # [batch_size, seq_len, num_experts]
+            mask = attention_mask.unsqueeze(-1)
+            # zero out weights for padding tokens
+            scores = scores * mask
+            # [batch_size, num_experts, k]
+            expert_weights, expert_indices = torch.topk(scores.transpose(1,2), (capacity * sq) // self.args.moe_num_experts, dim=-1)
+        else:
+            scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
+            expert_weights, expert_indices = self._top_k(scores)
 
-        expert_indices = (
-            _uniform_expert_assignment(expert_indices, self.args.moe_num_experts)
-            if self.args.uniform_expert_assignment else expert_indices
-        )
         return scores, expert_weights, expert_indices
 
         
