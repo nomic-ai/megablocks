@@ -19,6 +19,95 @@ class _UniformExpertAssignment(torch.autograd.Function):
 _uniform_expert_assignment = _UniformExpertAssignment.apply
 
 
+class LossFreeRouter(torch.nn.Module):
+    """
+    Router implementing Loss-Free Balancing for MoE routing.
+    Automatically adjusts per-expert biases during training to balance load
+    without requiring auxiliary losses.
+    """
+
+    def __init__(self, args: Arguments):
+        super().__init__()
+        self.args = args
+
+        # Learned router parameters
+        self.layer = torch.nn.Linear(
+            args.hidden_size,
+            args.moe_num_experts,
+            bias=False,
+            dtype=common.dtype(args),
+            device=args.device)
+        args.init_method(self.layer.weight)
+
+        # Per-expert biases for load balancing
+        self.register_buffer(
+            'expert_biases',
+            torch.zeros(args.moe_num_experts, dtype=common.dtype(args), device=args.device)
+        )
+        self.bias_update_rate = 0.01  # Can be made configurable via args
+
+    def _sync_biases(self):
+        """Synchronize expert biases across DDP processes."""
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(self.expert_biases)
+            self.expert_biases.div_(torch.distributed.get_world_size())
+
+    def _update_biases(self, token_counts, batch_size):
+        """Update expert biases based on load violations."""
+        if not self.training:
+            return
+
+        # Calculate target tokens per expert (average load)
+        tokens_per_expert = batch_size * self.args.moe_top_k / self.args.moe_num_experts
+        
+        # Calculate load violations
+        load_violations = token_counts.float() - tokens_per_expert
+        
+        # Update biases using sign of load violations
+        self.expert_biases.add_(
+            self.bias_update_rate * load_violations.sign()
+        )
+        
+        # Sync updated biases across processes
+        self._sync_biases()
+
+    def _top_k(self, scores):
+        if self.args.moe_top_k == 1:
+            return scores.max(dim=-1, keepdim=True)
+        return torch.topk(scores, self.args.moe_top_k, dim=-1)
+
+    def forward(self, x, attention_mask=None):
+        batch_shape = x.shape[:-1]
+        flat_x = x.view(-1, x.shape[-1])
+        batch_size = flat_x.shape[0]
+
+        # Get raw routing scores
+        raw_scores = self.layer(flat_x)
+        
+        # Add expert biases to scores
+        scores = raw_scores + self.expert_biases
+        scores = scores.softmax(dim=-1)
+
+        # Get top-k routing assignments
+        expert_weights, expert_indices = self._top_k(scores)
+
+        # Count tokens per expert
+        token_counts = torch.bincount(
+            expert_indices.view(-1),
+            minlength=self.args.moe_num_experts
+        )
+
+        # Update biases based on load violations
+        self._update_biases(token_counts, batch_size)
+
+        # Reshape outputs to match input batch shape
+        scores = scores.view(*batch_shape, -1)
+        expert_weights = expert_weights.view(*batch_shape, -1)
+        expert_indices = expert_indices.view(*batch_shape, -1)
+
+        return scores, expert_weights, expert_indices
+
+
 class LearnedRouter(torch.nn.Module):
 
     def __init__(self, args : Arguments):
